@@ -1,0 +1,6 @@
+@PayPal.Escrow.MilestoneEngine.With.C__HostAddress = http://localhost:5155
+
+GET {{PayPal.Escrow.MilestoneEngine.With.C__HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
