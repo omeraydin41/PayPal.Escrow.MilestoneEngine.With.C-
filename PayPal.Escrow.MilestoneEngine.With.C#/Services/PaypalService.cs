@@ -1,7 +1,7 @@
 ﻿
 using Microsoft.Extensions.Options;
 using PayPal.Escrow.MilestoneEngine.With.C_.Configurations;
-using PayPal.Escrow.MilestoneEngine.With.C_.Services.PayPal.Escrow.MilestoneEngine.With.C_.Services;
+
 using PayPalCheckoutSdk.Core;
 using PayPalCheckoutSdk.Orders;
 
@@ -50,6 +50,17 @@ namespace PayPal.Escrow.MilestoneEngine.With.C_.Services
             request.RequestBody(orderRequest);
 
             // PayPal sunucularına güvenli istek atılıyor
+            var response = await _client.Execute(request);
+            return response.Result<Order>();
+        }
+
+        // PaypalService.cs içerisine eklenecek metod:
+        public async Task<PayPalCheckoutSdk.Orders.Order> CaptureEscrowOrderAsync(string orderId)
+        {
+            var request = new OrdersCaptureRequest(orderId);
+            request.RequestBody(new OrderActionRequest());
+
+            // PayPal havuzunda parayı bloke ediyoruz
             var response = await _client.Execute(request);
             return response.Result<Order>();
         }

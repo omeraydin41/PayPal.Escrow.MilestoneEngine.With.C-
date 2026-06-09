@@ -1,15 +1,12 @@
-﻿using PayPalCheckoutSdk.Orders;
+﻿using System.Threading.Tasks;
+using PayPalCheckoutSdk.Orders;
 
 namespace PayPal.Escrow.MilestoneEngine.With.C_.Services
 {
-    using System.Threading.Tasks;
-
-    namespace PayPal.Escrow.MilestoneEngine.With.C_.Services
+    public interface IPaypalService
     {
-        public interface IPaypalService
-        {
-            // Dönüş tipini tam adıyla (PayPalCheckoutSdk.Orders.Order) tanımladık
-            Task<PayPalCheckoutSdk.Orders.Order> CreateEscrowOrderAsync(decimal amount, string currency, string contractId);
-        }
+        Task<Order> CreateEscrowOrderAsync(decimal amount, string currency, string contractId);
+        // IPaypalService.cs içerisine eklenecek:
+        Task<PayPalCheckoutSdk.Orders.Order> CaptureEscrowOrderAsync(string orderId);
     }
 }
