@@ -5,6 +5,8 @@ var builder = WebApplication.CreateBuilder(args);
 
 // appsettings'den verileri oku ve DI sistemine entegre et
 builder.Services.Configure<PaypalSettings>(builder.Configuration.GetSection("PaypalSettings"));
+// Veri deposunu DI sistemine kaydet
+builder.Services.AddSingleton<IContractRepository, ContractRepository>();
 
 // Servisimizi baðýmlýlýk konteynerýna kaydet
 builder.Services.AddScoped<IPaypalService, PaypalService>();
