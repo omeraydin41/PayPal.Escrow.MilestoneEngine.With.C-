@@ -1,27 +1,35 @@
+using Microsoft.AspNetCore.Builder;
 using PayPal.Escrow.MilestoneEngine.With.C_.Configurations;
 using PayPal.Escrow.MilestoneEngine.With.C_.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// appsettings'den verileri oku ve DI sistemine entegre et
-builder.Services.Configure<PaypalSettings>(builder.Configuration.GetSection("PaypalSettings"));
-// Veri deposunu DI sistemine kaydet
+// Configuration
+builder.Services.Configure<PaypalSettings>(
+    builder.Configuration.GetSection("PaypalSettings"));
+
+// Dependency Injection
 builder.Services.AddSingleton<IContractRepository, ContractRepository>();
-
-// Servisimizi baðýmlýlýk konteynerýna kaydet
 builder.Services.AddScoped<IPaypalService, PaypalService>();
-// Add services to the container.
 
+// Controllers
 builder.Services.AddControllers();
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
+
+// Swagger
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
+// Swagger Middleware
 if (app.Environment.IsDevelopment())
 {
-    app.MapOpenApi();
+    app.UseSwagger();
+    app.UseSwaggerUI(options =>
+    {
+        options.SwaggerEndpoint("/swagger/v1/swagger.json", "B2B Escrow API V1");
+        options.RoutePrefix = string.Empty; // Uygulama açýlýnca direkt Swagger gelsin
+    });
 }
 
 app.UseHttpsRedirection();

@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using PayPal.Escrow.MilestoneEngine.With.C_.Models;
 using PayPal.Escrow.MilestoneEngine.With.C_.Services;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 
@@ -11,14 +12,17 @@ namespace PayPal.Escrow.MilestoneEngine.With.C_.Controllers
     public class PaymentController : ControllerBase
     {
         private readonly IPaypalService _paypalService;
+        private readonly IContractRepository _contractRepository;
 
-        public PaymentController(IPaypalService paypalService)
+        // Repository katmanını sisteme enjekte ediyoruz
+        public PaymentController(IPaypalService paypalService, IContractRepository contractRepository)
         {
             _paypalService = paypalService;
+            _contractRepository = contractRepository;
         }
 
         /// <summary>
-        /// Şirket ile Ajans arasındaki sözleşme tutarını PayPal üzerinde havuzda (Escrow) başlatır.
+        /// B2B Sözleşmesi ve Hakedişleri ile birlikte Escrow (Güvenceli Havuz) sürecini başlatır.
         /// </summary>
         [HttpPost("create-escrow")]
         public async Task<IActionResult> CreateEscrow([FromBody] CorporatePaymentRequest request)
@@ -30,10 +34,8 @@ namespace PayPal.Escrow.MilestoneEngine.With.C_.Controllers
 
             try
             {
-                // 1. IPaypalService üzerinden PayPal API'sine istek atıp siparişi oluşturuyoruz
+                // 1. Önce PayPal üzerinde siparişi başlatıyoruz
                 var order = await _paypalService.CreateEscrowOrderAsync(request.TotalAmount, request.Currency, request.ContractId);
-
-                // 2. Şirket yetkilisinin gidip ödemeyi onaylaması gereken PayPal linkini (approve) ayıklıyoruz
                 var approveUrl = order.Links.FirstOrDefault(x => x.Rel.Equals("approve", System.StringComparison.OrdinalIgnoreCase))?.Href;
 
                 if (string.IsNullOrEmpty(approveUrl))
@@ -41,13 +43,30 @@ namespace PayPal.Escrow.MilestoneEngine.With.C_.Controllers
                     return StatusCode(500, new PaymentResponse { Message = "PayPal onay linki üretilemedi." });
                 }
 
-                // 3. Frontend'e veya istemciye kontrat bilgilerini ve yönlendirme linkini dönüyoruz
+                // 2. [YENİ] Sözleşmeyi ve kurumsal aşamalarını (Milestone) veritabanımıza kaydediyoruz
+                var contract = new B2BContract
+                {
+                    ContractId = request.ContractId,
+                    TotalAmount = request.TotalAmount,
+                    Currency = request.Currency,
+                    OrderId = order.Id, // PayPal eşleşmesi için kritik
+                    Status = PaymentStatus.Created,
+                    Milestones = new List<Milestone>
+                    {
+                        // Örnek olarak kurumsal senaryodaki gibi tutarı %50 - %50 iki hakedişe bölüyoruz
+                        new Milestone { MilestoneNumber = 1, Amount = request.TotalAmount * 0.5m, IsReleased = false, Description = "Milestone 1: %50 İlk Teslim Raporu" },
+                        new Milestone { MilestoneNumber = 2, Amount = request.TotalAmount * 0.5m, IsReleased = false, Description = "Milestone 2: %50 Proje Kapanışı ve Canlıya Alım" }
+                    }
+                };
+
+                await _contractRepository.SaveContractAsync(contract);
+
                 return Ok(new PaymentResponse
                 {
                     OrderId = order.Id,
-                    Status = PaymentStatus.Created.ToString(),
+                    Status = contract.Status.ToString(),
                     RedirectUrl = approveUrl,
-                    Message = $"Sözleşme {request.ContractId} için güvenceli havuz ödemesi oluşturuldu. Lütfen RedirectUrl üzerinden onaylayın."
+                    Message = $"Sözleşme {request.ContractId} sisteme kaydedildi ve %50 oranında 2 adet hakediş (Milestone) tanımlandı. Lütfen RedirectUrl üzerinden ödemeyi onaylayın."
                 });
             }
             catch (System.Exception ex)
@@ -56,64 +75,74 @@ namespace PayPal.Escrow.MilestoneEngine.With.C_.Controllers
             }
         }
 
-        // PaymentController.cs içindeki mevcut success metodunu bununla değiştir:
+        /// <summary>
+        /// Müşteri onayından sonra parayı havuzda bloke eder ve kontrat durumunu günceller.
+        /// </summary>
         [HttpGet("success")]
         public async Task<IActionResult> PaymentSuccess([FromQuery] string token, [FromQuery] string PayerID)
         {
             try
             {
-                // PayPal üzerinde bekleyen siparişi yakala ve parayı havuzda kilitle
-                // Not: PayPal API kurallarına göre buradaki 'token' aslında OrderId yerine geçer.
+                // 1. PayPal üzerinde parayı bloke et
                 var capturedOrder = await _paypalService.CaptureEscrowOrderAsync(token);
+
+                // 2. [YENİ] PayPal sipariş ID'sinden ilgili kurumsal sözleşmeyi bul
+                var contract = await _contractRepository.GetContractByOrderIdAsync(token);
+                if (contract != null)
+                {
+                    // Sözleşme durumunu havuzda kilitli (EscrowLocked) olarak güncelle
+                    contract.Status = PaymentStatus.EscrowLocked;
+                    await _contractRepository.UpdateContractAsync(contract);
+                }
 
                 return Ok(new
                 {
                     Status = PaymentStatus.EscrowLocked.ToString(),
-                    OrderId = capturedOrder.Id,
-                    Message = "Ödeme şirket tarafından onaylandı. Para güvenceli havuza (Escrow) alındı ve yasal süreç boyunca bloke edildi.",
-                    Details = "Proje ilerledikçe /release-milestone endpoint'i üzerinden hakedişleri serbest bırakabilirsiniz."
+                    ContractId = contract?.ContractId,
+                    Message = "Müşteri şirket ödemeyi onayladı. Para güvenli havuza (Escrow) alındı ve veritabanında güncellendi."
                 });
             }
             catch (System.Exception ex)
             {
-                return StatusCode(500, new { Message = $"Para havuzda kilitlenirken kurumsal hata oluştu: {ex.Message}" });
+                return StatusCode(500, new { Message = $"Para havuzda kilitlenirken hata oluştu: {ex.Message}" });
             }
         }
 
         /// <summary>
-        /// Şirket yetkilisi PayPal sayfasında işlemi iptal ederse buraya yönlendirilir.
-        /// </summary>
-        [HttpGet("cancel")]
-        public IActionResult PaymentCancel()
-        {
-            return BadRequest(new PaymentResponse
-            {
-                Status = PaymentStatus.Failed.ToString(),
-                Message = "Kurumsal ödeme işlemi şirket yetkilisi tarafından iptal edildi."
-            });
-        }
-        /// <summary>
-        /// Projenin ilgili aşaması (Milestone) tamamlandığında havuzdaki paranın belirlenen oranını alıcıya transfer eder.
+        /// Sözleşmeye ait belirli bir hakedişi (Milestone) onaylar ve parayı ajansa aktarır.
         /// </summary>
         [HttpPost("release-milestone")]
-        public IActionResult ReleaseMilestone([FromQuery] string contractId, [FromQuery] int milestoneNumber, [FromQuery] decimal releaseAmount)
+        public async Task<IActionResult> ReleaseMilestone([FromQuery] string contractId, [FromQuery] int milestoneNumber)
         {
-            // GERÇEK SENARYO: Burada PayPal Partner Payouts API veya Refund/Capture entegrasyonu tetiklenir.
-            // Şimdilik kurumsal iş akışını doğrulamak için loglayıp başarılı statü dönüyoruz.
-
             try
             {
-                // Kurumsal yasal süreç kontrolü (Simülasyon)
-                string logMessage = $"[HAK EDİŞ ONAYI] Sözleşme: {contractId} | Milestone: {milestoneNumber} | Transfer Edilen Tutar: {releaseAmount} USD";
-                System.Diagnostics.Debug.WriteLine(logMessage);
+                // 1. Sözleşmeyi getir
+                var contract = await _contractRepository.GetContractAsync(contractId);
+                if (contract == null) return NotFound(new { Message = "Sözleşme bulunamadı." });
+
+                // 2. İlgili Milestone'u bul
+                var milestone = contract.Milestones.FirstOrDefault(m => m.MilestoneNumber == milestoneNumber);
+                if (milestone == null) return BadRequest(new { Message = "Belirtilen hakediş aşaması bulunamadı." });
+                if (milestone.IsReleased) return BadRequest(new { Message = "Bu hakediş zaten daha önce ödenmiş." });
+
+                // 3. Durumu güncelle (Parayı serbest bırak)
+                milestone.IsReleased = true;
+
+                // Eğer tüm hakedişler ödendiyse sözleşmeyi tamamen kapat (Released)
+                if (contract.Milestones.All(m => m.IsReleased))
+                {
+                    contract.Status = PaymentStatus.Released;
+                }
+
+                await _contractRepository.UpdateContractAsync(contract);
 
                 return Ok(new
                 {
-                    Status = PaymentStatus.Released.ToString(),
-                    ContractId = contractId,
-                    Milestone = milestoneNumber,
-                    AmountReleased = releaseAmount,
-                    Message = $"Hakediş Raporu onaylandı. {releaseAmount} USD tutarındaki para havuzdan (Escrow) çıkartılarak ajans hesabına aktarıldı."
+                    Status = contract.Status.ToString(),
+                    ContractId = contract.ContractId,
+                    ReleasedMilestone = milestone.MilestoneNumber,
+                    TransferAmount = milestone.Amount,
+                    Message = $"{milestone.Description} başarıyla onaylandı. {milestone.Amount} {contract.Currency} ajans hesabına aktarıldı."
                 });
             }
             catch (System.Exception ex)
