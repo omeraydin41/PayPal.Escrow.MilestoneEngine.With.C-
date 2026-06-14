@@ -124,7 +124,12 @@ namespace PayPal.Escrow.MilestoneEngine.With.C_.Controllers
                 var milestone = contract.Milestones.FirstOrDefault(m => m.MilestoneNumber == milestoneNumber);
                 if (milestone == null) return BadRequest(new { Message = "Belirtilen hakediş aşaması bulunamadı." });
                 if (milestone.IsReleased) return BadRequest(new { Message = "Bu hakediş zaten daha önce ödenmiş." });
-
+               
+                // [YENİ KONTROL] Eğer uyuşmazlık varsa hakediş ödemesi yapılamaz!
+                if (contract.Status == PaymentStatus.Disputed)
+                {
+                    return BadRequest(new { Message = "Bu sözleşme üzerinde uyuşmazlık (Dispute) bulunmaktadır. Çözülene kadar hakediş serbest bırakılamaz." });
+                }
                 // 3. Durumu güncelle (Parayı serbest bırak)
                 milestone.IsReleased = true;
 
@@ -149,6 +154,122 @@ namespace PayPal.Escrow.MilestoneEngine.With.C_.Controllers
             {
                 return StatusCode(500, new { Message = $"Hakediş serbest bırakılırken hata: {ex.Message}" });
             }
+
         }
+        /// <summary>
+        /// Sözleşmeyi iptal eder ve havuzda kalan (ödenmemiş) tüm tutarı müşteriye iade eder.
+        /// </summary>
+        [HttpPost("{contractId}/cancel-and-refund")]
+        public async Task<IActionResult> CancelAndRefund(string contractId)
+        {
+            try
+            {
+                var contract = await _contractRepository.GetContractAsync(contractId);
+                if (contract == null) return NotFound(new { Message = "Sözleşme bulunamadı." });
+
+                if (contract.Status != PaymentStatus.EscrowLocked && contract.Status != PaymentStatus.Disputed)
+                {
+                    return BadRequest(new { Message = "Sadece havuzda kilitli veya uyuşmazlık durumundaki sözleşmeler iptal edilebilir." });
+                }
+
+                // Henüz ajansa ödenmemiş hakedişlerin toplamını bul
+                var refundableAmount = contract.Milestones
+                    .Where(m => !m.IsReleased)
+                    .Sum(m => m.Amount);
+
+                if (refundableAmount <= 0)
+                {
+                    return BadRequest(new { Message = "İade edilecek serbest kalmamış hakediş bulunamadı." });
+                }
+
+                // TODO: İleride buraya PayPal API Refund entegrasyonu gelecek.
+                // Örn: await _paypalService.RefundOrderAsync(contract.OrderId, refundableAmount);
+
+                contract.Status = PaymentStatus.Failed;
+                await _contractRepository.UpdateContractAsync(contract);
+
+                return Ok(new
+                {
+                    Status = contract.Status.ToString(),
+                    RefundedAmount = refundableAmount,
+                    Message = $"Sözleşme iptal edildi. Havuzda bekleyen {refundableAmount} {contract.Currency} tutarı müşteriye iade edildi."
+                });
+            }
+            catch (System.Exception ex)
+            {
+                return StatusCode(500, new { Message = $"İade işlemi sırasında hata: {ex.Message}" });
+            }
+        }
+
+        /// <summary>
+        /// Sözleşmenin ilerleme durumunu ve finansal havuz özetini (Dashboard için) getirir.
+        /// </summary>
+        [HttpGet("{contractId}/status")]
+        public async Task<IActionResult> GetContractStatus(string contractId)
+        {
+            var contract = await _contractRepository.GetContractAsync(contractId);
+            if (contract == null) return NotFound(new { Message = "Sözleşme bulunamadı." });
+
+            var totalPaid = contract.Milestones.Where(m => m.IsReleased).Sum(m => m.Amount);
+            var totalLocked = contract.Milestones.Where(m => !m.IsReleased).Sum(m => m.Amount);
+            var completedMilestonesCount = contract.Milestones.Count(m => m.IsReleased);
+
+            return Ok(new
+            {
+                ContractId = contract.ContractId,
+                CurrentStatus = contract.Status.ToString(),
+                Currency = contract.Currency,
+                FinancialSummary = new
+                {
+                    TotalContractAmount = contract.TotalAmount,
+                    AmountPaidToAgency = totalPaid,       // Ajansa giden
+                    AmountLockedInEscrow = totalLocked,   // Havuzda kalan
+                    ProgressPercentage = contract.TotalAmount > 0 ? (totalPaid / contract.TotalAmount) * 100 : 0
+                },
+                MilestonesSummary = new
+                {
+                    TotalMilestones = contract.Milestones.Count,
+                    CompletedMilestones = completedMilestonesCount,
+                    PendingMilestones = contract.Milestones.Count - completedMilestonesCount
+                },
+                Milestones = contract.Milestones
+            });
+        }
+
+        /// <summary>
+        /// Taraflar arasında anlaşmazlık çıktığında havuzdaki parayı bloke eder ve işlemleri dondurur.
+        /// </summary>
+        [HttpPost("{contractId}/raise-dispute")]
+        public async Task<IActionResult> RaiseDispute(string contractId, [FromBody] DisputeRequest request)
+        {
+            var contract = await _contractRepository.GetContractAsync(contractId);
+            if (contract == null) return NotFound(new { Message = "Sözleşme bulunamadı." });
+
+            if (contract.Status != PaymentStatus.EscrowLocked)
+            {
+                return BadRequest(new { Message = "Sadece aktif ve havuzda parası kilitli olan sözleşmeler için uyuşmazlık başlatılabilir." });
+            }
+
+            contract.Status = PaymentStatus.Disputed;
+            await _contractRepository.UpdateContractAsync(contract);
+
+            return Ok(new
+            {
+                Status = contract.Status.ToString(),
+                ContractId = contract.ContractId,
+                Reason = request.Reason,
+                Message = "Sözleşme askıya alındı (Disputed). Sistem yöneticisi hakemlik edene kadar hiçbir hakediş (Milestone) ödemesi yapılamaz."
+            });
+        }
+
+        /*
+         * git commit -m "
+        ENG : Three new functional endpoints—which block funds in the escrow account in the event of a dispute,
+        provide a financial status summary for the Dashboard, and refund the remaining amount to the customer 
+        in the event of a cancellation—have been successfully designed and added to the controllers and models.
+        TUR : Uyuşmazlık (Dispute) durumunda havuzdaki parayı bloke eden, Dashboard için finansal durum özetini getiren ve 
+        iptal durumunda kalan tutarı müşteriye iade eden 3 yeni işlevsel endpoint başarıyla tasarlanıp controller ve modellere eklendi."
+         */
+
     }
 }

@@ -5,6 +5,7 @@
         Created,        // Ödeme emri PayPal'da oluşturuldu, onay bekliyor
         EscrowLocked,   // Müşteri onayladı, para havuzda bloke edildi
         Released,       // Hak ediş (Milestone) onaylandı, para alıcıya aktarıldı
-        Failed          // İşlem başarısız
+        Failed,      // İşlem başarısız
+        Disputed        // [YENİ] Uyuşmazlık var, havuz donduruldu!
     }
 }
